@@ -1,0 +1,147 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"    # vX.Y.Z
+      - "v[0-9]*.[0-9]*.[0-9]*.*"  # vX.Y.ZaN / rcN / .postN / .devN
+
+concurrency:
+  group: pypi-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    environment: release
+    name: release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write   # Required for PyPI Trusted Publishing
+
+    env:
+      PYTHON_VERSION: "3.12"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive tag and version (supports pre/post/dev)
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_REF="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG_REF" >> "$GITHUB_OUTPUT"
+
+          # Accept vX.Y.Z[aN|bN|rcN][.postN][.devN]
+          # Examples: v0.0.1, v0.0.1a0, v1.2.3rc1, v1.2.3.post1, v1.2.3rc1.post1.dev2
+          if [[ "$TAG_REF" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$ ]]; then
+            CORE="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+            PRE="${BASH_REMATCH[4]}"
+            POST="${BASH_REMATCH[6]}"
+            DEV="${BASH_REMATCH[7]}"
+            VERSION="${CORE}${PRE}${POST}${DEV}"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "Accepted tag '$TAG_REF' → version '$VERSION'"
+          else
+            echo "Tag '$TAG_REF' is not a valid release tag."
+            echo "   Use vX.Y.Z or vX.Y.ZaN/bN/rcN[.postN][.devN] (e.g., v0.0.1, v0.0.1a0)."
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build tooling (strict)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade build setuptools wheel
+          # Quick sanity check that modules are importable
+          python - <<'PY'
+          import importlib
+          for m in ("build","setuptools","wheel"):
+              importlib.import_module(m)
+          print("build tooling present")
+          PY
+
+      - name: Resolve project version and verify tag match
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          import sys, pathlib, subprocess
+
+          # Ensure packaging is available here
+          try:
+              from packaging.version import Version
+          except Exception:
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "packaging"], stdout=subprocess.DEVNULL)
+              from packaging.version import Version
+
+          tag_version = "${{ steps.tag.outputs.version }}"
+          pyproject = pathlib.Path("pyproject.toml")
+          if not pyproject.exists():
+              print("Error: pyproject.toml not found", file=sys.stderr)
+              sys.exit(1)
+
+          # tomllib on 3.11+, else tomli (install if missing)
+          try:
+              import tomllib as toml
+          except Exception:
+              try:
+                  import tomli as toml
+              except Exception:
+                  subprocess.check_call([sys.executable, "-m", "pip", "install", "tomli"], stdout=subprocess.DEVNULL)
+                  import tomli as toml
+
+          data = toml.loads(pyproject.read_text())
+          project = data.get("project", {})
+          dynamic = set(map(str.lower, project.get("dynamic", [])))
+          declared = project.get("version")
+
+          def scm_version():
+              try:
+                  subprocess.check_call([sys.executable, "-m", "pip", "install", "setuptools_scm"], stdout=subprocess.DEVNULL)
+                  out = subprocess.check_output([sys.executable, "-m", "setuptools_scm"], text=True).strip()
+                  return out
+              except Exception as e:
+                  print(f"Error computing setuptools_scm version: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          if declared:
+              proj_version = declared
+          elif "version" in dynamic:
+              proj_version = scm_version()
+          else:
+              print("Error: No 'project.version' and not dynamic; cannot determine version.", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              ok = Version(proj_version) == Version(tag_version)
+          except Exception:
+              ok = (proj_version == tag_version)
+
+          if not ok:
+              print(f"Error: Tag version ({tag_version}) != project version ({proj_version})", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"Verified: v{tag_version} == {proj_version}")
+          PY
+
+      - name: Build distributions
+        run: |
+          python -m build
+          ls -lh dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true   # Uses OIDC Trusted Publishing if configured on PyPI
+          # provenance: true
+          # print-hash: true
