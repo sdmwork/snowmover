@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "snowmover"
-version = "0.0.1"
+version = "0.0.1a0"
 description = "A lightweight Python toolkit for Snowflake data moves: upload local text files with PUT/COPY INTO, row-by-row inserts, extract tables to local files (TXT/CSV/Excel), Snowflake-to-Snowflake transfers, and simple, secure connection helpers."
 readme = "README.md"
 requires-python = ">=3.10"
