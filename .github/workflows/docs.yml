@@ -1,0 +1,70 @@
+name: docs-publish
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'docs/**'
+      - '.readthedocs.yaml'
+      - 'pyproject.toml'
+      - 'README.md'
+
+concurrency:
+  group: docs-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-docs:
+    name: Build Sphinx docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [[ -f docs/requirements.txt ]]; then
+            pip install -r docs/requirements.txt
+          else
+            pip install sphinx myst-parser furo sphinx-autodoc-typehints
+          fi
+          # install your project for autodoc imports
+          if [[ -f pyproject.toml || -f setup.py ]]; then
+            pip install -e .
+          fi
+
+      - name: Build HTML documentation
+        run: |
+          sphinx-build -b html docs/ docs/_build/html
+          echo "Sphinx build completed successfully"
+
+      - name: Upload HTML docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sphinx-html
+          path: docs/_build/html
+          retention-days: 7
+
+  trigger-rtd:
+    name: Trigger Read the Docs build
+    needs: build-docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger RTD build
+        uses: readthedocs/actions@v1
+        with:
+          token: ${{ secrets.READTHEDOCS_TOKEN }}
+          project-slug: your-project-slug
+          # Optional: trigger a specific version (e.g., latest)
+          # version: latest
